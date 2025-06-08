@@ -285,11 +285,20 @@ const ProductCard = ({ product }) => {
       const apiKey = ""; // Leave as empty string, Canvas will provide at runtime
       const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
+      console.log("Attempting Gemini API call. URL:", apiUrl); // Log the URL for debugging
+
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
+
+      if (!response.ok) {
+        const errorDetails = await response.text(); // Get raw error response
+        console.error(`Gemini API call failed: Status ${response.status}, Details:`, errorDetails);
+        setEnhanceMessage(`Failed to enhance description: ${response.status} - ${errorDetails.substring(0, 100)}...`);
+        throw new Error(`Gemini API call failed with status ${response.status}`);
+      }
 
       const result = await response.json();
 
