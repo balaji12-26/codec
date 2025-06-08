@@ -1,0 +1,527 @@
+import React, { useState, useEffect, createContext, useContext } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, addDoc, serverTimestamp } from 'firebase/firestore';
+
+// Ensure Tailwind CSS is available in the environment.
+// No explicit import needed if already configured globally.
+
+// Firebase Context to provide db, auth, and userId to all components
+const FirebaseContext = createContext(null);
+
+const App = () => {
+  // Global variables for Firebase config and app ID
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ecommerce-app';
+  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+  const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [currentPage, setCurrentPage] = useState('products'); // 'products', 'cart', 'auth'
+  const [message, setMessage] = useState(''); // General message for user feedback
+
+  // Initialize Firebase and set up authentication listener
+  useEffect(() => {
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestoreDb = getFirestore(app);
+      const firebaseAuth = getAuth(app);
+
+      setDb(firestoreDb);
+      setAuth(firebaseAuth);
+
+      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+        if (user) {
+          // User is signed in.
+          setUserId(user.uid);
+          setMessage(`Signed in as: ${user.email || user.uid}`);
+        } else {
+          // User is signed out or not yet authenticated.
+          setUserId(null);
+          setMessage('Not signed in.');
+          // Attempt anonymous sign-in if no custom token is provided
+          if (!initialAuthToken) {
+            try {
+              await signInAnonymously(firebaseAuth);
+              setMessage('Signed in anonymously.');
+            } catch (error) {
+              console.error('Error signing in anonymously:', error);
+              setMessage(`Error signing in: ${error.message}`);
+            }
+          }
+        }
+        setIsAuthReady(true); // Authentication state is now ready
+      });
+
+      // Sign in with custom token if available
+      if (initialAuthToken) {
+        signInWithCustomToken(firebaseAuth, initialAuthToken)
+          .then(() => {
+            setMessage('Signed in with custom token.');
+          })
+          .catch((error) => {
+            console.error('Error signing in with custom token:', error);
+            setMessage(`Error with custom token: ${error.message}`);
+          });
+      }
+
+      return () => unsubscribe(); // Clean up auth listener on unmount
+    } catch (error) {
+      console.error("Failed to initialize Firebase:", error);
+      setMessage(`Firebase initialization error: ${error.message}`);
+    }
+  }, [appId, firebaseConfig, initialAuthToken]); // Dependencies for Firebase initialization
+
+  // Loading state while Firebase auth is not ready
+  if (!isAuthReady) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
+        <div className="text-xl font-semibold text-gray-700">Loading application...</div>
+      </div>
+    );
+  }
+
+  // Display user ID for debugging/identification purposes
+  const displayUserId = userId || 'N/A';
+
+  return (
+    <FirebaseContext.Provider value={{ db, auth, userId, appId, isAuthReady }}>
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-100 text-gray-900 font-sans p-4">
+        <header className="bg-white shadow-lg rounded-xl p-6 mb-8 flex flex-col sm:flex-row justify-between items-center">
+          <h1 className="text-4xl font-extrabold text-indigo-800 mb-4 sm:mb-0">My E-Shop</h1>
+          <nav className="flex space-x-4">
+            <button
+              onClick={() => setCurrentPage('products')}
+              className={`px-6 py-3 rounded-lg font-medium text-lg transition duration-300 ease-in-out ${currentPage === 'products' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'}`}
+            >
+              Products
+            </button>
+            <button
+              onClick={() => setCurrentPage('cart')}
+              className={`px-6 py-3 rounded-lg font-medium text-lg transition duration-300 ease-in-out ${currentPage === 'cart' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'}`}
+            >
+              Cart
+            </button>
+            <button
+              onClick={() => setCurrentPage('auth')}
+              className={`px-6 py-3 rounded-lg font-medium text-lg transition duration-300 ease-in-out ${currentPage === 'auth' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'}`}
+            >
+              Account
+            </button>
+          </nav>
+        </header>
+
+        {message && (
+          <div className="bg-blue-100 text-blue-800 p-4 rounded-lg mb-6 shadow-md flex items-center justify-between">
+            <span>{message}</span>
+            <span className="text-sm text-gray-600">User ID: {displayUserId}</span>
+          </div>
+        )}
+
+        <main className="bg-white shadow-lg rounded-xl p-8">
+          {currentPage === 'products' && <ProductList />}
+          {currentPage === 'cart' && <Cart />}
+          {currentPage === 'auth' && <AuthComponent />}
+        </main>
+      </div>
+    </FirebaseContext.Provider>
+  );
+};
+
+// --- Product List Component ---
+const ProductList = () => {
+  const { db, appId, isAuthReady } = useContext(FirebaseContext);
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!db || !isAuthReady) return;
+
+    // Path for public data: /artifacts/{appId}/public/data/products
+    const productsCollectionRef = collection(db, `artifacts/${appId}/public/data/products`);
+    const q = query(productsCollectionRef);
+
+    // Listen for real-time updates to products
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      try {
+        const productsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setProducts(productsData);
+        setLoading(false);
+      } catch (e) {
+        console.error("Error fetching products:", e);
+        setError("Failed to load products.");
+        setLoading(false);
+      }
+    }, (e) => {
+      console.error("Firestore onSnapshot error for products:", e);
+      setError("Failed to subscribe to product updates.");
+      setLoading(false);
+    });
+
+    // Add some sample products if the collection is empty (for demonstration)
+    const checkAndAddSampleProducts = async () => {
+      try {
+        const docSnap = await getDoc(doc(productsCollectionRef, 'sample_product_1')); // Check for a specific sample doc
+        if (!docSnap.exists()) {
+          console.log("Adding sample products...");
+          await setDoc(doc(productsCollectionRef, 'sample_product_1'), {
+            name: 'Stylish Headphones',
+            description: 'Immersive sound experience with noise cancellation.',
+            price: 199.99,
+            imageUrl: 'https://placehold.co/400x300/a78bfa/ffffff?text=Headphones', // Placeholder image
+            category: 'Electronics'
+          });
+          await setDoc(doc(productsCollectionRef, 'sample_product_2'), {
+            name: 'Ergonomic Office Chair',
+            description: 'Designed for comfort during long working hours.',
+            price: 349.00,
+            imageUrl: 'https://placehold.co/400x300/6366f1/ffffff?text=Office+Chair', // Placeholder image
+            category: 'Furniture'
+          });
+          await setDoc(doc(productsCollectionRef, 'sample_product_3'), {
+            name: 'Smartwatch Pro',
+            description: 'Track your fitness and stay connected on the go.',
+            price: 149.50,
+            imageUrl: 'https://placehold.co/400x300/3b82f6/ffffff?text=Smartwatch', // Placeholder image
+            category: 'Wearables'
+          });
+        }
+      } catch (e) {
+        console.error("Error adding sample products:", e);
+      }
+    };
+    checkAndAddSampleProducts();
+
+
+    return () => unsubscribe(); // Cleanup snapshot listener
+  }, [db, appId, isAuthReady]);
+
+  if (loading) return <div className="text-center py-8 text-indigo-700">Loading products...</div>;
+  if (error) return <div className="text-center py-8 text-red-600">Error: {error}</div>;
+  if (products.length === 0) return <div className="text-center py-8 text-gray-600">No products available.</div>;
+
+  return (
+    <div>
+      <h2 className="text-3xl font-bold text-indigo-700 mb-6 border-b-2 pb-2 border-indigo-200">Our Products</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {products.map(product => (
+          <ProductCard key={product.id} product={product} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// --- Product Card Component ---
+const ProductCard = ({ product }) => {
+  const { db, userId, appId } = useContext(FirebaseContext);
+  const [addingToCart, setAddingToCart] = useState(false);
+  const [addMessage, setAddMessage] = useState('');
+
+  const handleAddToCart = async () => {
+    if (!userId || !db) {
+      setAddMessage('Please log in to add items to cart.');
+      return;
+    }
+
+    setAddingToCart(true);
+    setAddMessage('');
+    try {
+      // Path for private user data: /artifacts/{appId}/users/{userId}/users
+      const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/users`, userId);
+      const userDocSnap = await getDoc(userDocRef);
+
+      let cartItems = [];
+      if (userDocSnap.exists()) {
+        const userData = userDocSnap.data();
+        cartItems = userData.cartItems || [];
+      }
+
+      // Check if product already in cart
+      const existingItemIndex = cartItems.findIndex(item => item.productId === product.id);
+
+      if (existingItemIndex > -1) {
+        // Update quantity
+        cartItems[existingItemIndex].quantity += 1;
+      } else {
+        // Add new item
+        cartItems.push({
+          productId: product.id,
+          name: product.name,
+          price: product.price,
+          imageUrl: product.imageUrl,
+          quantity: 1
+        });
+      }
+
+      await setDoc(userDocRef, { cartItems, lastUpdated: serverTimestamp() }, { merge: true });
+      setAddMessage('Item added to cart!');
+    } catch (error) {
+      console.error("Error adding to cart:", error);
+      setAddMessage(`Failed to add to cart: ${error.message}`);
+    } finally {
+      setAddingToCart(false);
+      setTimeout(() => setAddMessage(''), 3000); // Clear message after 3 seconds
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-xl shadow-md overflow-hidden transform hover:scale-105 transition duration-300 ease-in-out p-6 flex flex-col">
+      <img
+        src={product.imageUrl}
+        alt={product.name}
+        className="w-full h-48 object-cover rounded-lg mb-4"
+        onError={(e) => { e.target.onerror = null; e.target.src = 'https://placehold.co/400x300/cccccc/000000?text=Image+Error'; }} // Fallback image
+      />
+      <h3 className="text-xl font-semibold text-gray-800 mb-2">{product.name}</h3>
+      <p className="text-gray-600 text-sm mb-4 flex-grow">{product.description}</p>
+      <div className="flex justify-between items-center mt-auto">
+        <span className="text-2xl font-bold text-indigo-700">${product.price.toFixed(2)}</span>
+        <button
+          onClick={handleAddToCart}
+          disabled={addingToCart}
+          className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-indigo-700 transition duration-300 ease-in-out shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {addingToCart ? 'Adding...' : 'Add to Cart'}
+        </button>
+      </div>
+      {addMessage && (
+        <p className={`mt-2 text-sm ${addMessage.includes('Failed') ? 'text-red-500' : 'text-green-500'}`}>
+          {addMessage}
+        </p>
+      )}
+    </div>
+  );
+};
+
+// --- Cart Component ---
+const Cart = () => {
+  const { db, userId, appId, isAuthReady } = useContext(FirebaseContext);
+  const [cartItems, setCartItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!db || !userId || !isAuthReady) {
+      setLoading(false);
+      setCartItems([]);
+      return;
+    }
+
+    // Path for private user data: /artifacts/{appId}/users/{userId}/users
+    const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/users`, userId);
+
+    const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+      try {
+        if (docSnap.exists()) {
+          const userData = docSnap.data();
+          setCartItems(userData.cartItems || []);
+        } else {
+          setCartItems([]); // User document doesn't exist, cart is empty
+        }
+        setLoading(false);
+      } catch (e) {
+        console.error("Error fetching cart:", e);
+        setError("Failed to load cart items.");
+        setLoading(false);
+      }
+    }, (e) => {
+      console.error("Firestore onSnapshot error for cart:", e);
+      setError("Failed to subscribe to cart updates.");
+      setLoading(false);
+    });
+
+    return () => unsubscribe(); // Cleanup snapshot listener
+  }, [db, userId, appId, isAuthReady]);
+
+  const handleUpdateQuantity = async (productId, delta) => {
+    if (!db || !userId) return;
+
+    try {
+      const userDocRef = doc(db, `artifacts/${appId}/users/${userId}/users`, userId);
+      const updatedCartItems = cartItems.map(item =>
+        item.productId === productId ? { ...item, quantity: item.quantity + delta } : item
+      ).filter(item => item.quantity > 0); // Remove if quantity is zero or less
+
+      await updateDoc(userDocRef, { cartItems: updatedCartItems, lastUpdated: serverTimestamp() });
+    } catch (error) {
+      console.error("Error updating cart quantity:", error);
+      setError(`Failed to update quantity: ${error.message}`);
+    }
+  };
+
+  const calculateTotal = () => {
+    return cartItems.reduce((acc, item) => acc + (item.price * item.quantity), 0).toFixed(2);
+  };
+
+  if (loading) return <div className="text-center py-8 text-indigo-700">Loading cart...</div>;
+  if (!userId) return <div className="text-center py-8 text-gray-600">Please log in or sign up to view your cart.</div>;
+  if (error) return <div className="text-center py-8 text-red-600">Error: {error}</div>;
+  if (cartItems.length === 0) return <div className="text-center py-8 text-gray-600">Your cart is empty.</div>;
+
+  return (
+    <div>
+      <h2 className="text-3xl font-bold text-indigo-700 mb-6 border-b-2 pb-2 border-indigo-200">Your Shopping Cart</h2>
+      <div className="space-y-4">
+        {cartItems.map(item => (
+          <div key={item.productId} className="flex items-center bg-gray-50 p-4 rounded-lg shadow-sm">
+            <img
+              src={item.imageUrl}
+              alt={item.name}
+              className="w-20 h-20 object-cover rounded-md mr-4"
+              onError={(e) => { e.target.onerror = null; e.target.src = 'https://placehold.co/80x80/cccccc/000000?text=Image'; }}
+            />
+            <div className="flex-grow">
+              <h3 className="text-lg font-semibold text-gray-800">{item.name}</h3>
+              <p className="text-indigo-600 font-medium">${item.price.toFixed(2)}</p>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => handleUpdateQuantity(item.productId, -1)}
+                className="bg-red-500 text-white px-3 py-1 rounded-full hover:bg-red-600 transition duration-200"
+              >
+                -
+              </button>
+              <span className="text-xl font-semibold">{item.quantity}</span>
+              <button
+                onClick={() => handleUpdateQuantity(item.productId, 1)}
+                className="bg-green-500 text-white px-3 py-1 rounded-full hover:bg-green-600 transition duration-200"
+              >
+                +
+              </button>
+            </div>
+            <span className="ml-4 text-xl font-bold text-indigo-700">${(item.price * item.quantity).toFixed(2)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-8 pt-4 border-t-2 border-indigo-200 flex justify-end items-center">
+        <span className="text-2xl font-bold text-gray-800 mr-4">Total:</span>
+        <span className="text-3xl font-extrabold text-indigo-800">${calculateTotal()}</span>
+        <button className="bg-indigo-600 text-white px-8 py-3 rounded-lg ml-6 font-semibold text-lg hover:bg-indigo-700 transition duration-300 ease-in-out shadow-lg">
+          Proceed to Checkout
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// --- Auth Component ---
+const AuthComponent = () => {
+  const { auth, userId } = useContext(FirebaseContext);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false); // Toggle between login and register
+
+  const handleAuthAction = async (action) => {
+    setAuthMessage('');
+    if (!auth) {
+      setAuthMessage('Firebase Auth not initialized.');
+      return;
+    }
+    if (!email || !password) {
+      setAuthMessage('Please enter both email and password.');
+      return;
+    }
+
+    try {
+      if (action === 'register') {
+        await createUserWithEmailAndPassword(auth, email, password);
+        setAuthMessage('Registration successful! You are now logged in.');
+      } else { // 'login'
+        await signInWithEmailAndPassword(auth, email, password);
+        setAuthMessage('Login successful!');
+      }
+      setEmail('');
+      setPassword('');
+    } catch (error) {
+      console.error("Auth error:", error);
+      setAuthMessage(`Auth error: ${error.message}`);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setAuthMessage('');
+    if (!auth) {
+      setAuthMessage('Firebase Auth not initialized.');
+      return;
+    }
+    try {
+      await signOut(auth);
+      setAuthMessage('Successfully signed out.');
+    } catch (error) {
+      console.error("Sign out error:", error);
+      setAuthMessage(`Sign out error: ${error.message}`);
+    }
+  };
+
+  return (
+    <div className="max-w-md mx-auto p-6 bg-white rounded-xl shadow-md">
+      <h2 className="text-3xl font-bold text-indigo-700 mb-6 border-b-2 pb-2 border-indigo-200">
+        {userId ? 'Your Account' : (isRegistering ? 'Register' : 'Login')}
+      </h2>
+
+      {authMessage && (
+        <div className={`mb-4 p-3 rounded-lg text-center ${authMessage.includes('error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+          {authMessage}
+        </div>
+      )}
+
+      {userId ? (
+        <div className="text-center">
+          <p className="text-lg text-gray-700 mb-4">You are currently logged in.</p>
+          <button
+            onClick={handleSignOut}
+            className="bg-red-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-red-700 transition duration-300 shadow-md"
+          >
+            Sign Out
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">Email:</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="your@example.com"
+            />
+          </div>
+          <div>
+            <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">Password:</label>
+            <input
+              type="password"
+              id="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+              placeholder="********"
+            />
+          </div>
+          <div className="flex justify-between items-center mt-6">
+            <button
+              onClick={() => handleAuthAction(isRegistering ? 'register' : 'login')}
+              className="bg-indigo-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-indigo-700 transition duration-300 shadow-md flex-grow mr-2"
+            >
+              {isRegistering ? 'Register' : 'Login'}
+            </button>
+            <button
+              onClick={() => setIsRegistering(!isRegistering)}
+              className="bg-gray-200 text-gray-800 px-6 py-3 rounded-lg font-medium hover:bg-gray-300 transition duration-300 shadow-md flex-grow ml-2"
+            >
+              {isRegistering ? 'Go to Login' : 'Go to Register'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default App;
