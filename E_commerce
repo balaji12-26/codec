@@ -1,7 +1,7 @@
 import React, { useState, useEffect, createContext, useContext } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, addDoc, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, addDoc, getDocs, serverTimestamp } from 'firebase/firestore';
 
 // Ensure Tailwind CSS is available in the environment.
 // No explicit import needed if already configured globally.
@@ -164,8 +164,9 @@ const ProductList = () => {
     // Add some sample products if the collection is empty (for demonstration)
     const checkAndAddSampleProducts = async () => {
       try {
-        const docSnap = await getDoc(doc(productsCollectionRef, 'sample_product_1')); // Check for a specific sample doc
-        if (!docSnap.exists()) {
+        // Check if any product exists to avoid overwriting user data
+        const snapshot = await getDocs(productsCollectionRef);
+        if (snapshot.empty) {
           console.log("Adding sample products...");
           await setDoc(doc(productsCollectionRef, 'sample_product_1'), {
             name: 'Stylish Headphones',
@@ -220,6 +221,8 @@ const ProductCard = ({ product }) => {
   const { db, userId, appId } = useContext(FirebaseContext);
   const [addingToCart, setAddingToCart] = useState(false);
   const [addMessage, setAddMessage] = useState('');
+  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [enhanceMessage, setEnhanceMessage] = useState('');
 
   const handleAddToCart = async () => {
     if (!userId || !db) {
@@ -268,6 +271,55 @@ const ProductCard = ({ product }) => {
     }
   };
 
+  const handleEnhanceDescription = async () => {
+    setIsEnhancing(true);
+    setEnhanceMessage('');
+    try {
+      const prompt = `Rewrite the following product description to be more engaging and detailed for an e-commerce website. Make it sound professional and enticing.
+      Product Name: ${product.name}
+      Current Description: ${product.description}`;
+
+      let chatHistory = [];
+      chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+      const payload = { contents: chatHistory };
+      const apiKey = ""; // Leave as empty string, Canvas will provide at runtime
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+
+      if (result.candidates && result.candidates.length > 0 &&
+          result.candidates[0].content && result.candidates[0].content.parts &&
+          result.candidates[0].content.parts.length > 0) {
+        const newDescription = result.candidates[0].content.parts[0].text;
+
+        // Update the description in Firestore
+        if (db) {
+          const productDocRef = doc(db, `artifacts/${appId}/public/data/products`, product.id);
+          await updateDoc(productDocRef, { description: newDescription, lastEnhanced: serverTimestamp() });
+          setEnhanceMessage('Description enhanced and saved!');
+        } else {
+          console.warn("Firestore not available to save enhanced description.");
+          setEnhanceMessage('Description enhanced locally (not saved).');
+        }
+      } else {
+        setEnhanceMessage('Failed to get enhanced description from AI.');
+        console.error("Gemini API response structure unexpected:", result);
+      }
+    } catch (error) {
+      console.error("Error enhancing description:", error);
+      setEnhanceMessage(`Error enhancing description: ${error.message}`);
+    } finally {
+      setIsEnhancing(false);
+      setTimeout(() => setEnhanceMessage(''), 5000); // Clear message after 5 seconds
+    }
+  };
+
   return (
     <div className="bg-white rounded-xl shadow-md overflow-hidden transform hover:scale-105 transition duration-300 ease-in-out p-6 flex flex-col">
       <img
@@ -278,21 +330,45 @@ const ProductCard = ({ product }) => {
       />
       <h3 className="text-xl font-semibold text-gray-800 mb-2">{product.name}</h3>
       <p className="text-gray-600 text-sm mb-4 flex-grow">{product.description}</p>
-      <div className="flex justify-between items-center mt-auto">
-        <span className="text-2xl font-bold text-indigo-700">${product.price.toFixed(2)}</span>
+      <div className="flex flex-col gap-2 mt-auto">
+        <div className="flex justify-between items-center">
+          <span className="text-2xl font-bold text-indigo-700">${product.price.toFixed(2)}</span>
+          <button
+            onClick={handleAddToCart}
+            disabled={addingToCart}
+            className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-indigo-700 transition duration-300 ease-in-out shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {addingToCart ? 'Adding...' : 'Add to Cart'}
+          </button>
+        </div>
+        {addMessage && (
+          <p className={`mt-2 text-sm ${addMessage.includes('Failed') ? 'text-red-500' : 'text-green-500'}`}>
+            {addMessage}
+          </p>
+        )}
         <button
-          onClick={handleAddToCart}
-          disabled={addingToCart}
-          className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-indigo-700 transition duration-300 ease-in-out shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={handleEnhanceDescription}
+          disabled={isEnhancing}
+          className="bg-purple-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-purple-700 transition duration-300 ease-in-out shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
         >
-          {addingToCart ? 'Adding...' : 'Add to Cart'}
+          {isEnhancing ? (
+            <>
+              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Enhancing...
+            </>
+          ) : (
+            '✨ Enhance Description'
+          )}
         </button>
+        {enhanceMessage && (
+          <p className={`mt-2 text-sm ${enhanceMessage.includes('Error') ? 'text-red-500' : 'text-purple-700'}`}>
+            {enhanceMessage}
+          </p>
+        )}
       </div>
-      {addMessage && (
-        <p className={`mt-2 text-sm ${addMessage.includes('Failed') ? 'text-red-500' : 'text-green-500'}`}>
-          {addMessage}
-        </p>
-      )}
     </div>
   );
 };
