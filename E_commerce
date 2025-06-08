@@ -9,6 +9,30 @@ import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, q
 // Firebase Context to provide db, auth, and userId to all components
 const FirebaseContext = createContext(null);
 
+// --- MessageModal Component ---
+const MessageModal = ({ message, type, onClose }) => {
+  const bgColorClass = type === 'error' ? 'bg-red-500' : 'bg-green-500';
+  const title = type === 'error' ? 'Error' : 'Success';
+
+  return (
+    <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+        <div className={`text-xl font-bold mb-4 p-2 rounded ${bgColorClass} text-white`}>{title}</div>
+        <div className="text-gray-700 mb-6 whitespace-pre-wrap">{message}</div>
+        <div className="flex justify-end">
+          <button
+            onClick={onClose}
+            className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-medium hover:bg-indigo-700 transition duration-300 ease-in-out shadow-md"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
 const App = () => {
   // Global variables for Firebase config and app ID
   const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ecommerce-app';
@@ -21,6 +45,18 @@ const App = () => {
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [currentPage, setCurrentPage] = useState('products'); // 'products', 'cart', 'auth'
   const [message, setMessage] = useState(''); // General message for user feedback
+  const [modalMessage, setModalMessage] = useState(null); // { message: string, type: 'success' | 'error' }
+
+  // Function to show modal message
+  const showModal = (msg, type) => {
+    setModalMessage({ message: msg, type: type });
+  };
+
+  // Function to close modal message
+  const closeModal = () => {
+    setModalMessage(null);
+  };
+
 
   // Initialize Firebase and set up authentication listener
   useEffect(() => {
@@ -87,7 +123,7 @@ const App = () => {
   const displayUserId = userId || 'N/A';
 
   return (
-    <FirebaseContext.Provider value={{ db, auth, userId, appId, isAuthReady }}>
+    <FirebaseContext.Provider value={{ db, auth, userId, appId, isAuthReady, showModal }}>
       <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-100 text-gray-900 font-sans p-4">
         <header className="bg-white shadow-lg rounded-xl p-6 mb-8 flex flex-col sm:flex-row justify-between items-center">
           <h1 className="text-4xl font-extrabold text-indigo-800 mb-4 sm:mb-0">My E-Shop</h1>
@@ -126,6 +162,13 @@ const App = () => {
           {currentPage === 'auth' && <AuthComponent />}
         </main>
       </div>
+      {modalMessage && (
+        <MessageModal
+          message={modalMessage.message}
+          type={modalMessage.type}
+          onClose={closeModal}
+        />
+      )}
     </FirebaseContext.Provider>
   );
 };
@@ -218,7 +261,7 @@ const ProductList = () => {
 
 // --- Product Card Component ---
 const ProductCard = ({ product }) => {
-  const { db, userId, appId } = useContext(FirebaseContext);
+  const { db, userId, appId, showModal } = useContext(FirebaseContext);
   const [addingToCart, setAddingToCart] = useState(false);
   const [addMessage, setAddMessage] = useState('');
   const [isEnhancing, setIsEnhancing] = useState(false);
@@ -226,7 +269,8 @@ const ProductCard = ({ product }) => {
 
   const handleAddToCart = async () => {
     if (!userId || !db) {
-      setAddMessage('Please log in to add items to cart.');
+      showModal('Please log in to add items to cart.', 'error');
+      setAddMessage('Please log in to add items to cart.'); // Keep inline for consistency with other messages
       return;
     }
 
@@ -261,13 +305,15 @@ const ProductCard = ({ product }) => {
       }
 
       await setDoc(userDocRef, { cartItems, lastUpdated: serverTimestamp() }, { merge: true });
+      showModal('Item added to cart successfully!', 'success');
       setAddMessage('Item added to cart!');
     } catch (error) {
       console.error("Error adding to cart:", error);
+      showModal(`Failed to add to cart: ${error.message}`, 'error');
       setAddMessage(`Failed to add to cart: ${error.message}`);
     } finally {
       setAddingToCart(false);
-      setTimeout(() => setAddMessage(''), 3000); // Clear message after 3 seconds
+      setTimeout(() => setAddMessage(''), 3000); // Clear inline message after 3 seconds
     }
   };
 
@@ -296,7 +342,9 @@ const ProductCard = ({ product }) => {
       if (!response.ok) {
         const errorDetails = await response.text(); // Get raw error response
         console.error(`Gemini API call failed: Status ${response.status}, Details:`, errorDetails);
-        setEnhanceMessage(`Failed to enhance description: ${response.status} - ${errorDetails.substring(0, 100)}...`);
+        const errorMessage = `Failed to enhance description: Status ${response.status}. Details: ${errorDetails.substring(0, 200)}...`; // Truncate for modal
+        showModal(errorMessage, 'error');
+        setEnhanceMessage(errorMessage);
         throw new Error(`Gemini API call failed with status ${response.status}`);
       }
 
@@ -311,21 +359,27 @@ const ProductCard = ({ product }) => {
         if (db) {
           const productDocRef = doc(db, `artifacts/${appId}/public/data/products`, product.id);
           await updateDoc(productDocRef, { description: newDescription, lastEnhanced: serverTimestamp() });
+          showModal('Description enhanced and saved successfully!', 'success');
           setEnhanceMessage('Description enhanced and saved!');
         } else {
           console.warn("Firestore not available to save enhanced description.");
+          showModal('Description enhanced locally (not saved).', 'error');
           setEnhanceMessage('Description enhanced locally (not saved).');
         }
       } else {
-        setEnhanceMessage('Failed to get enhanced description from AI.');
+        const errorMessage = 'Failed to get enhanced description from AI. Unexpected API response structure.';
+        showModal(errorMessage, 'error');
+        setEnhanceMessage(errorMessage);
         console.error("Gemini API response structure unexpected:", result);
       }
     } catch (error) {
       console.error("Error enhancing description:", error);
-      setEnhanceMessage(`Error enhancing description: ${error.message}`);
+      const errorMessage = `Error enhancing description: ${error.message}`;
+      showModal(errorMessage, 'error');
+      setEnhanceMessage(errorMessage);
     } finally {
       setIsEnhancing(false);
-      setTimeout(() => setEnhanceMessage(''), 5000); // Clear message after 5 seconds
+      setTimeout(() => setEnhanceMessage(''), 5000); // Clear inline message after 5 seconds
     }
   };
 
@@ -384,7 +438,7 @@ const ProductCard = ({ product }) => {
 
 // --- Cart Component ---
 const Cart = () => {
-  const { db, userId, appId, isAuthReady } = useContext(FirebaseContext);
+  const { db, userId, appId, isAuthReady, showModal } = useContext(FirebaseContext);
   const [cartItems, setCartItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -410,17 +464,19 @@ const Cart = () => {
         setLoading(false);
       } catch (e) {
         console.error("Error fetching cart:", e);
+        showModal(`Failed to load cart items: ${e.message}`, 'error');
         setError("Failed to load cart items.");
         setLoading(false);
       }
     }, (e) => {
       console.error("Firestore onSnapshot error for cart:", e);
+      showModal(`Failed to subscribe to cart updates: ${e.message}`, 'error');
       setError("Failed to subscribe to cart updates.");
       setLoading(false);
     });
 
     return () => unsubscribe(); // Cleanup snapshot listener
-  }, [db, userId, appId, isAuthReady]);
+  }, [db, userId, appId, isAuthReady, showModal]);
 
   const handleUpdateQuantity = async (productId, delta) => {
     if (!db || !userId) return;
@@ -432,8 +488,10 @@ const Cart = () => {
       ).filter(item => item.quantity > 0); // Remove if quantity is zero or less
 
       await updateDoc(userDocRef, { cartItems: updatedCartItems, lastUpdated: serverTimestamp() });
+      showModal('Cart quantity updated successfully!', 'success');
     } catch (error) {
       console.error("Error updating cart quantity:", error);
+      showModal(`Failed to update quantity: ${error.message}`, 'error');
       setError(`Failed to update quantity: ${error.message}`);
     }
   };
@@ -495,19 +553,20 @@ const Cart = () => {
 
 // --- Auth Component ---
 const AuthComponent = () => {
-  const { auth, userId } = useContext(FirebaseContext);
+  const { auth, userId, showModal } = useContext(FirebaseContext);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [authMessage, setAuthMessage] = useState('');
-  const [isRegistering, setIsRegistering] = useState(false); // Toggle between login and register
+  const [authMessage, setAuthMessage] = useState(''); // Still used for inline messages
 
   const handleAuthAction = async (action) => {
     setAuthMessage('');
     if (!auth) {
+      showModal('Firebase Auth not initialized.', 'error');
       setAuthMessage('Firebase Auth not initialized.');
       return;
     }
     if (!email || !password) {
+      showModal('Please enter both email and password.', 'error');
       setAuthMessage('Please enter both email and password.');
       return;
     }
@@ -515,15 +574,18 @@ const AuthComponent = () => {
     try {
       if (action === 'register') {
         await createUserWithEmailAndPassword(auth, email, password);
+        showModal('Registration successful! You are now logged in.', 'success');
         setAuthMessage('Registration successful! You are now logged in.');
       } else { // 'login'
         await signInWithEmailAndPassword(auth, email, password);
+        showModal('Login successful!', 'success');
         setAuthMessage('Login successful!');
       }
       setEmail('');
       setPassword('');
     } catch (error) {
       console.error("Auth error:", error);
+      showModal(`Authentication error: ${error.message}`, 'error');
       setAuthMessage(`Auth error: ${error.message}`);
     }
   };
@@ -531,14 +593,17 @@ const AuthComponent = () => {
   const handleSignOut = async () => {
     setAuthMessage('');
     if (!auth) {
+      showModal('Firebase Auth not initialized.', 'error');
       setAuthMessage('Firebase Auth not initialized.');
       return;
     }
     try {
       await signOut(auth);
+      showModal('Successfully signed out.', 'success');
       setAuthMessage('Successfully signed out.');
     } catch (error) {
       console.error("Sign out error:", error);
+      showModal(`Sign out error: ${error.message}`, 'error');
       setAuthMessage(`Sign out error: ${error.message}`);
     }
   };
